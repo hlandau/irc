@@ -2,8 +2,6 @@ package parse
 
 import "fmt"
 
-//import "github.com/hlandau/degoutils/log"
-
 type IRCMessage struct {
 	// :server.name
 	ServerName string
@@ -103,12 +101,21 @@ type IRCParser struct {
 
 var errMalformedMessage = fmt.Errorf("Malformed IRC protocol message")
 
-// Retrirves an array of parsed messages. The internal slice of such mssages
+// Retrieves an array of parsed messages. The internal slice of such mssages
 // is then cleared, so subsequent calls to GetMessages() will return an empty slice.
 func (p *IRCParser) GetMessages() []*IRCMessage {
 	k := p.msgs
 	p.msgs = p.msgs[0:0]
 	return k
+}
+
+func (p *IRCParser) GetMessage() *IRCMessage {
+  if len(p.msgs) == 0 {
+    return nil
+  }
+  k := p.msgs[0]
+  p.msgs = p.msgs[1:]
+  return k
 }
 
 // Parse arbitrary IRC protocol input. This does not need to be line-aligned.
