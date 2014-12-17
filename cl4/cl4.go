@@ -24,9 +24,27 @@ type Cl4 struct {
   pongChan chan struct{}
 }
 
+type privLevel int
+const (
+  plNone privLevel = iota
+  plVoice
+  plHalfop
+  plOp
+  plAdmin
+  plFounder
+)
+
 type channel struct {
   JoinChannel
   joinedEpoch uint32
+  members map[string]*member
+}
+
+type member struct {
+  userName string
+  nickName string
+  hostName string
+  privLevel privLevel
 }
 
 type Config struct {
@@ -71,6 +89,7 @@ func Dial(scope, address string, cfg Config) (*Cl4, error) {
   for _, jc := range c.cfg.JoinChannels {
     ch := &channel{
       JoinChannel: jc,
+      members: map[string]*member{},
     }
     c.channels[jc.Channel] = ch
   }
@@ -178,7 +197,10 @@ func (c *Cl4) processIncomingMsgInternally(m *parse.IRCMessage) {
 
     if m.NickName == c.backing().NickName() {
       c.markChannelAsJoined(m.Args[0], true)
+      break
     }
+
+    c.userEnteredChannel(m.Args[0], m.UserName, m.HostName, m.NickName, "", false)
 
   case "PART", "KICK":
     if len(m.Args) < 2 {
@@ -187,10 +209,40 @@ func (c *Cl4) processIncomingMsgInternally(m *parse.IRCMessage) {
 
     if m.Args[1] == c.backing().NickName() {
       c.markChannelAsJoined(m.Args[0], false)
+      break
     }
+
+    c.userLeftChannel(m.Args[0], m.UserName, m.HostName, m.NickName, (m.Command == "KICK"))
+
+  case "NICK":
+    if len(m.Args) < 1 {
+      break
+    }
+
+    c.userChangedNick(m.NickName, m.Args[0])
 
   case "PONG":
     trySema(c.pongChan)
+
+  case "352": // RPL_WHOREPLY
+    if len(m.Args) < 7 {
+      break
+    }
+
+    channelName := m.Args[0]
+    userName := m.Args[1]
+    hostName := m.Args[2]
+    //serverName := m.Args[3]
+    nickName := m.Args[4]
+    flags := m.Args[5]
+    //realName := m.Args[6]
+
+    c.userEnteredChannel(channelName, userName, hostName, nickName, flags, true)
+
+  case "315": // RPL_ENDOFWHO
+
+  case "353": // RPL_NAMREPLY
+  case "366": // RPL_ENDOFNAMES
   }
 }
 
@@ -265,6 +317,7 @@ func (c *Cl4) addChannelJoin(channelName, key string) {
   ch := &channel{}
   ch.Channel = channelName
   ch.Key = key
+  ch.members = map[string]*member{}
 
   c.channels[channelName] = ch
 
@@ -294,10 +347,93 @@ func (c *Cl4) markChannelAsJoined(channelName string, joined bool) {
 
   if joined {
     ch.joinedEpoch = atomic.LoadUint32(&c.epoch)
+    c.solicitChannelMembers(channelName)
   } else {
     ch.joinedEpoch = 0
+    ch.members = map[string]*member{}
     trySema(c.channelsUpdatedChan)
   }
+}
+
+func (c *Cl4) solicitChannelMembers(channelName string) {
+  c.WriteCmd("WHO", channelName)
+}
+
+func (c *Cl4) userEnteredChannel(channelName, userName, hostName, nickName, flags string, live bool) {
+  c.channelsMutex.Lock()
+  defer c.channelsMutex.Unlock()
+
+  ch, ok := c.channels[channelName]
+  if !ok {
+    return
+  }
+
+  pl := parsePrivSigils(flags)
+
+  mi := &member{}
+  if mi2, ok := ch.members[nickName]; ok {
+    mi = mi2
+  }
+
+  mi.userName = userName
+  mi.nickName = nickName
+  mi.hostName = hostName
+  mi.privLevel = pl
+
+  ch.members[nickName] = mi
+}
+
+func (c *Cl4) userLeftChannel(channelName, userName, hostName, nickName string, wasKicked bool) {
+  c.channelsMutex.Lock()
+  defer c.channelsMutex.Unlock()
+
+  ch, ok := c.channels[channelName]
+  if !ok {
+    return
+  }
+
+  _, ok = ch.members[nickName]
+  if !ok {
+    return
+  }
+
+  delete(ch.members, nickName)
+}
+
+func (c *Cl4) userChangedNick(oldNickName, newNickName string) {
+  c.channelsMutex.Lock()
+  defer c.channelsMutex.Lock()
+
+  for _, ch := range c.channels {
+    mi, ok := ch.members[oldNickName]
+    if ok {
+      delete(ch.members, oldNickName)
+      ch.members[newNickName] = mi
+      mi.nickName = newNickName
+    }
+  }
+}
+
+func parsePrivSigils(sigils string) privLevel {
+  pl := plNone
+  for _, r := range sigils {
+    if r == '@' && pl < plOp {
+      pl = plOp
+    }
+    if r == '+' && pl < plVoice {
+      pl = plVoice
+    }
+    if r == '%' && pl < plHalfop {
+      pl = plHalfop
+    }
+    if r == '&' && pl < plAdmin {
+      pl = plAdmin
+    }
+    if r == '~' && pl < plFounder {
+      pl = plFounder
+    }
+  }
+  return pl
 }
 
 func trySema(c chan struct{}) {
