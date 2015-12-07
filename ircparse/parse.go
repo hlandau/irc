@@ -1,35 +1,64 @@
-package parse
+// Package ircparse provides an IRC message parser and serializer supporting
+// RFC1459 and IRCv3 message tags.
+package ircparse
 
 import "fmt"
 
-type IRCMessage struct {
-	// :server.name
+// An RFC1459 IRC protocol message. Supports IRCv3 tags.
+type Message struct {
+	// Where :server.name is present, this is "server.name".
 	ServerName string
 
-	// :nick!user@host
+	// Where :nick!user@host is present, this is nick, user and host.
 	NickName string
 	UserName string
 	HostName string
 
-	// Command name (uppercase) or numeric
+	// Command name (uppercase) or three-digit numeric.
 	Command string
 
-	// All arguments including trailing argument.
-	// Note that the trailing argument is not in any way
-	// semantically distinct from the other arguments.
+	// All arguments including trailing argument. Note that the trailing
+	// argument is not in any way semantically distinct from the other arguments,
+	// but it may contain spaces.
 	Args []string
+
+	// IRCv3 tags. nil if no tags were specified. Tags without values have empty string values.
+	// @tag1=tagvalue;tag2=tagvalue
+	Tags map[string]string
 }
 
-func (m *IRCMessage) IsFromServer() bool {
+// True iff message has a server name.
+func (m *Message) IsFromServer() bool {
 	return m.ServerName != ""
 }
 
-func (m *IRCMessage) IsFromClient() bool {
+// True iff message has a nickname.
+func (m *Message) IsFromClient() bool {
 	return m.NickName != ""
 }
 
-func (m *IRCMessage) String() string {
+// Marshal a message as an RFC1459 protocol line, including any IRCv3 message
+// tags if specified.
+func (m *Message) String() string {
 	s := ""
+	if len(m.Tags) > 0 {
+		s += "@"
+		first := true
+		for k, v := range m.Tags {
+			if first {
+				first = false
+			} else {
+				s += ";"
+			}
+			s += k
+			if len(v) > 0 {
+				s += "="
+				s += v
+			}
+		}
+		s += " "
+	}
+
 	if m.ServerName != "" {
 		s += ":"
 		s += m.ServerName
@@ -87,13 +116,19 @@ const (
 	psTARGCONT
 	psEXPECTLF
 	psEND
+
+	psTAGKEY
+	psTAGVALUE
+	psAFTERTAGS
 )
 
-type IRCParser struct {
+// RFC1459 IRC message parser supporting IRCv3 message tags.
+type Parser struct {
 	state parseState
 	s     string
-	msgs  []*IRCMessage
-	m     *IRCMessage
+	k     string // tag key
+	msgs  []*Message
+	m     *Message
 
 	// The number of malformed messages that have been received.
 	MalformedMessageCount int
@@ -103,19 +138,21 @@ var errMalformedMessage = fmt.Errorf("Malformed IRC protocol message")
 
 // Retrieves an array of parsed messages. The internal slice of such mssages
 // is then cleared, so subsequent calls to GetMessages() will return an empty slice.
-func (p *IRCParser) GetMessages() []*IRCMessage {
+func (p *Parser) PopMessages() []*Message {
 	k := p.msgs
 	p.msgs = p.msgs[0:0]
 	return k
 }
 
-func (p *IRCParser) GetMessage() *IRCMessage {
-  if len(p.msgs) == 0 {
-    return nil
-  }
-  k := p.msgs[0]
-  p.msgs = p.msgs[1:]
-  return k
+// Retrieves a message. The next message will be returned on the next call. nil
+// is returned if there are no more messages.
+func (p *Parser) PopMessage() *Message {
+	if len(p.msgs) == 0 {
+		return nil
+	}
+	k := p.msgs[0]
+	p.msgs = p.msgs[1:]
+	return k
 }
 
 // Parse arbitrary IRC protocol input. This does not need to be line-aligned.
@@ -125,9 +162,9 @@ func (p *IRCParser) GetMessage() *IRCMessage {
 //
 // Malformed messages are skipped until their terminating newline, and parsing
 // continues from there. The MalformedMessageCount is incremented.
-func (p *IRCParser) Parse(s string) (err error) {
+func (p *Parser) Parse(s string) (err error) {
 	if p.m == nil {
-		p.m = &IRCMessage{}
+		p.m = &Message{}
 	}
 
 	recovery := false
@@ -144,7 +181,7 @@ func (p *IRCParser) Parse(s string) (err error) {
 			// error recovery: start ignoring until the end of the line
 			p.state = psDRIFTING
 			p.s = ""
-			p.m = &IRCMessage{}
+			p.m = &Message{}
 			recovery = true
 			p.MalformedMessageCount++
 		}
@@ -153,16 +190,59 @@ func (p *IRCParser) Parse(s string) (err error) {
 	return nil
 }
 
-func (p *IRCParser) pdispatch(c rune) error {
+func (p *Parser) pdispatch(c rune) error {
 	//log.Info(fmt.Sprintf("state %+v", p.state))
 	switch p.state {
-	case psDRIFTING:
+	case psDRIFTING, psAFTERTAGS:
 		if c == ':' {
 			p.state = psFROMSTART
+		} else if c == '@' && p.state != psAFTERTAGS {
+			p.state = psTAGKEY
 		} else {
 			// psCOMMANDSTART
 			p.state = psCOMMANDSTART
 			return p.pdispatch(c) // reissue
+		}
+
+	case psTAGKEY:
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '.' {
+			p.s += string(c)
+		} else if c == ';' || c == ' ' {
+			if p.m.Tags == nil {
+				p.m.Tags = map[string]string{}
+			}
+
+			p.m.Tags[p.s] = ""
+			p.s = ""
+			if c == ' ' {
+				p.state = psAFTERTAGS
+			}
+		} else if c == '=' {
+			p.k = p.s
+			p.s = ""
+			p.state = psTAGVALUE
+		} else {
+			return errMalformedMessage
+		}
+
+	case psTAGVALUE:
+		if c == ';' || c == ' ' {
+			if p.m.Tags == nil {
+				p.m.Tags = map[string]string{}
+			}
+
+			p.m.Tags[p.k] = p.s
+			p.s = ""
+			p.k = ""
+			if c == ';' {
+				p.state = psTAGKEY
+			} else {
+				p.state = psAFTERTAGS
+			}
+		} else if c == 0 || c == '\r' || c == '\n' {
+			return errMalformedMessage
+		} else {
+			p.s += string(c)
 		}
 
 	case psFROMSTART:
@@ -412,7 +492,7 @@ func (p *IRCParser) pdispatch(c rune) error {
 		} else {
 			p.state = psDRIFTING
 			p.msgs = append(p.msgs, p.m)
-			p.m = &IRCMessage{}
+			p.m = &Message{}
 		}
 	}
 
