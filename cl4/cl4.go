@@ -1,508 +1,309 @@
 package cl4
-import "fmt"
-import "sync"
-import "sync/atomic"
-import "time"
-import "unsafe"
-import "github.com/hlandau/irc/cl3"
-import "github.com/hlandau/irc/parse"
-import denet "github.com/hlandau/degoutils/net"
 
-type Cl4 struct {
-  cfg Config
-  cl3 unsafe.Pointer
-  scope, address string
-  replaceWaitChan chan struct{}
-  replacer uint32
-  epoch uint32
-  closed uint32
-
-  channelsMutex sync.Mutex
-  channels map[string]*channel
-  channelsUpdatedChan chan struct{}
-  closeChan chan struct{}
-  pongChan chan struct{}
-}
-
-type privLevel int
-const (
-  plNone privLevel = iota
-  plVoice
-  plHalfop
-  plOp
-  plAdmin
-  plFounder
+import (
+	"fmt"
+	"github.com/hlandau/degoutils/monitor"
+	denet "github.com/hlandau/degoutils/net"
+	"github.com/hlandau/irc/cl3"
+	"github.com/hlandau/irc/ircparse"
+	"github.com/hlandau/xlog"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
-type channel struct {
-  JoinChannel
-  joinedEpoch uint32
-  members map[string]*member
-}
+var log, Log = xlog.NewQuiet("irc.cl4")
 
-type member struct {
-  userName string
-  nickName string
-  hostName string
-  privLevel privLevel
+type Cl4 struct {
+	cfg                 Config
+	cl3                 *cl3.Cl3
+	scope, address      string
+	closeOnce           sync.Once
+	closeChan           chan struct{}
+	stopPingChan        chan struct{}
+	txChan              chan *ircparse.Message
+	rxChan              chan *ircparse.Message
+	rxPingChan          chan *ircparse.Message
+	forceDisconnectChan chan struct{}
+	closed              uint32
 }
 
 type Config struct {
-  cl3.Config
-  Backoff denet.Backoff
-  JoinChannels []JoinChannel
-  PingInterval time.Duration
-  PingTimeout time.Duration
+	cl3.Config
+	Backoff      denet.Backoff
+	PingInterval time.Duration
+	PingTimeout  time.Duration
 }
 
 func (cfg *Config) setDefaults() {
-  if cfg.PingInterval == 0 && cfg.PingTimeout == 0 {
-    cfg.PingInterval = 1*time.Minute
-    cfg.PingTimeout  = 2*time.Minute
-  } else if cfg.PingInterval != 0 {
-    cfg.PingTimeout = 2*cfg.PingInterval
-  } else if cfg.PingTimeout != 0 {
-    cfg.PingInterval = cfg.PingTimeout/2
-  }
-}
-
-type JoinChannel struct {
-  Channel string
-  Key string
+	if cfg.PingInterval == 0 && cfg.PingTimeout == 0 {
+		cfg.PingInterval = 1 * time.Minute
+		cfg.PingTimeout = 2 * time.Minute
+	} else if cfg.PingInterval != 0 {
+		cfg.PingTimeout = 2 * cfg.PingInterval
+	} else if cfg.PingTimeout != 0 {
+		cfg.PingInterval = cfg.PingTimeout / 2
+	}
 }
 
 func Dial(scope, address string, cfg Config) (*Cl4, error) {
-  c := &Cl4{
-    cfg: cfg,
-    scope: scope,
-    address: address,
-    epoch: 1,
-    replaceWaitChan: make(chan struct{}),
-    channels: map[string]*channel{},
-    channelsUpdatedChan: make(chan struct{}, 1),
-    closeChan: make(chan struct{}),
-    pongChan: make(chan struct{}),
-  }
+	c := &Cl4{
+		cfg:                 cfg,
+		scope:               scope,
+		address:             address,
+		closeChan:           make(chan struct{}),
+		stopPingChan:        make(chan struct{}),
+		txChan:              make(chan *ircparse.Message),
+		rxChan:              make(chan *ircparse.Message),
+		rxPingChan:          make(chan *ircparse.Message),
+		forceDisconnectChan: make(chan struct{}),
+	}
 
-  c.cfg.setDefaults()
+	c.cfg.setDefaults()
 
-  for _, jc := range c.cfg.JoinChannels {
-    ch := &channel{
-      JoinChannel: jc,
-      members: map[string]*member{},
-    }
-    c.channels[jc.Channel] = ch
-  }
+	go c.connectLoop()
 
-  cc, err := cl3.Dial(scope, address, c.cfg.Config)
-  if err != nil {
-    return nil, err
-  }
-
-  c.cl3 = unsafe.Pointer(cc)
-
-  go c.joinLoop()
-  go c.pingLoop()
-
-  return c, nil
-}
-
-func (c *Cl4) backing() *cl3.Cl3 {
-  return (*cl3.Cl3)(atomic.LoadPointer(&c.cl3))
-}
-
-func (c *Cl4) Close() error {
-  if atomic.AddUint32(&c.closed, 1) != 1 {
-    return nil
-  }
-
-  close(c.channelsUpdatedChan)
-  close(c.closeChan)
-  return c.backing().Close()
-}
-
-func (c *Cl4) WriteCmd(cmd string, args ...string) error {
-  for {
-    err := c.backing().WriteCmd(cmd, args...)
-    if err == nil {
-      return nil
-    }
-
-    err = c.replaceClient()
-    if err != nil {
-      return err
-    }
-  }
-}
-
-func (c *Cl4) WriteMsg(m *parse.IRCMessage) error {
-  for {
-    err := c.backing().WriteMsg(m)
-    if err == nil {
-      c.processOutgoingMsgInternally(m)
-      return nil
-    }
-
-    err = c.replaceClient()
-    if err != nil {
-      return err
-    }
-  }
-}
-
-func (c *Cl4) ReadMsg() (*parse.IRCMessage, error) {
-  for {
-    m, err := c.backing().ReadMsg()
-    if err == nil {
-      c.processIncomingMsgInternally(m)
-      return m, nil
-    }
-
-    err = c.replaceClient()
-    if err != nil {
-      return nil, err
-    }
-  }
-}
-
-func (c *Cl4) processOutgoingMsgInternally(m *parse.IRCMessage) {
-  switch m.Command {
-  case "JOIN":
-    if len(m.Args) < 1 {
-      break
-    }
-
-    key := ""
-    if len(m.Args) > 1 {
-      key = m.Args[1]
-    }
-
-    c.addChannelJoin(m.Args[0], key)
-
-  case "PART":
-    if len(m.Args) < 1 {
-      break
-    }
-
-    c.removeChannelJoin(m.Args[0])
-  }
-}
-
-func (c *Cl4) processIncomingMsgInternally(m *parse.IRCMessage) {
-  switch m.Command {
-  case "JOIN":
-    if len(m.Args) < 1 {
-      break
-    }
-
-    if m.NickName == c.backing().NickName() {
-      c.markChannelAsJoined(m.Args[0], true)
-      break
-    }
-
-    c.userEnteredChannel(m.Args[0], m.UserName, m.HostName, m.NickName, "", false)
-
-  case "PART", "KICK":
-    if len(m.Args) < 2 {
-      break
-    }
-
-    if m.Args[1] == c.backing().NickName() {
-      c.markChannelAsJoined(m.Args[0], false)
-      break
-    }
-
-    c.userLeftChannel(m.Args[0], m.UserName, m.HostName, m.NickName, (m.Command == "KICK"))
-
-  case "NICK":
-    if len(m.Args) < 1 {
-      break
-    }
-
-    c.userChangedNick(m.NickName, m.Args[0])
-
-  case "PONG":
-    trySema(c.pongChan)
-
-  case "352": // RPL_WHOREPLY
-    if len(m.Args) < 7 {
-      break
-    }
-
-    channelName := m.Args[0]
-    userName := m.Args[1]
-    hostName := m.Args[2]
-    //serverName := m.Args[3]
-    nickName := m.Args[4]
-    flags := m.Args[5]
-    //realName := m.Args[6]
-
-    c.userEnteredChannel(channelName, userName, hostName, nickName, flags, true)
-
-  case "315": // RPL_ENDOFWHO
-
-  case "353": // RPL_NAMREPLY
-  case "366": // RPL_ENDOFNAMES
-  }
+	return c, nil
 }
 
 func (c *Cl4) pingLoop() {
-  lastPong := time.Now()
+	var txPingTime, rxPingTime time.Time
+	i := 0
+	waitingFor := map[string]struct{}{}
 
-  for {
-    select {
-    case <-c.closeChan:
-      return
-    case <-c.pongChan:
-      lastPong = time.Now()
-    case <-time.After(c.cfg.PingInterval):
-      if time.Now().After(lastPong.Add(c.cfg.PingTimeout)) {
-        c.replaceClient()
-        continue
-      }
+	for {
+		select {
+		case <-time.After(c.cfg.PingInterval):
+			if !txPingTime.IsZero() && time.Since(rxPingTime) >= c.cfg.PingTimeout {
+				log.Debug("ping timeout")
+				trySema(c.forceDisconnectChan)
+				return
+			}
 
-      c.writePing("CL")
-    }
-  }
+			tag := fmt.Sprintf("CL%04d", i%10000)
+			waitingFor[tag] = struct{}{}
+			i++
+
+			err := ircparse.WriteCmd(c, "PING", tag)
+			if err != nil {
+				return
+			}
+
+			txPingTime = time.Now()
+
+		case m := <-c.rxPingChan:
+			if len(m.Args) > 0 {
+				_, ok := waitingFor[m.Args[0]]
+				if ok {
+					delete(waitingFor, m.Args[0])
+					rxPingTime = time.Now()
+				}
+			}
+
+		case <-c.stopPingChan:
+			return
+		case <-c.closeChan:
+			return
+		}
+	}
 }
 
-func (c *Cl4) writePing(args ...string) {
-  c.WriteCmd("PING", args...)
+func trySema(c chan<- struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
 }
 
-func (c *Cl4) joinLoop() {
-  for {
-    if atomic.LoadUint32(&c.closed) != 0 {
-      return
-    }
+// Main lifecycle management loop.
+func (c *Cl4) connectLoop() {
+	var rxTerminationChan <-chan monitor.Event
+	var txTerminationChan <-chan monitor.Event
+	connectRequestChan := make(chan struct{}, 1)
+	connectRequestChan <- struct{}{}
 
-    anyNotJoined := c.jlJoinChannels()
-    if !anyNotJoined {
-      <-c.channelsUpdatedChan
-    } else {
-      select {
-      case <-c.closeChan:
-        return
-      case <-c.channelsUpdatedChan:
-      case <-time.After(1*time.Minute):
-      }
-    }
-  }
+	for {
+		select {
+		case <-rxTerminationChan:
+			log.Debug("rx exited")
+			// rx goroutine has terminated, so we need to
+			//   - tear down the connection
+			c.clDisconnect()
+			//   - coax the tx goroutine into exiting by sending a nil message
+			c.txChan <- nil
+			//   - ensure that the tx goroutine exits, ensuring that the nil
+			//     message we just sent doesn't get consumed by a future
+			//     tx goroutine.
+			<-txTerminationChan
+			txTerminationChan = nil
+			//   - schedule reconnection.
+			connectRequestChan <- struct{}{}
+
+		case <-txTerminationChan:
+			log.Debug("tx exited")
+			// tx goroutine has terminated, so we need to
+			//   - tear down the connection; this will also cause the
+			//     rx goroutine to exit.
+			c.clDisconnect()
+			//   - ensure that the rx goroutine exits.
+			<-rxTerminationChan
+			rxTerminationChan = nil
+			//   - schedule reconnection.
+			connectRequestChan <- struct{}{}
+
+		case <-c.forceDisconnectChan:
+			// Sent by ping loop.
+			log.Debug("forcing disconnect (ping timeout)")
+			c.clDisconnect()
+			<-rxTerminationChan
+			rxTerminationChan = nil
+			c.txChan <- nil
+			<-txTerminationChan
+			txTerminationChan = nil
+			connectRequestChan <- struct{}{}
+
+		case <-connectRequestChan:
+			// Perform (re)connection.
+			log.Debug("connecting")
+
+			err := c.clConnect()
+			if err != nil {
+				// Maximum connection attempts reached, permanently fail this logical
+				// connection.
+				c.Close()
+				break
+			}
+
+			// Launch the rx/tx goroutines under monitors.
+			rxTerminationChan = monitor.Monitor(func() error {
+				c.rxLoop()
+				return nil
+			})
+
+			txTerminationChan = monitor.Monitor(func() error {
+				c.txLoop()
+				return nil
+			})
+
+			go c.pingLoop()
+
+			c.rxChan <- &ircparse.Message{
+				Command: "$NEWCONN",
+			}
+
+		case <-c.closeChan:
+			log.Debug("closing")
+			// Closure requested.
+			c.clDisconnect()
+			return
+		}
+	}
 }
 
-func (c *Cl4) jlJoinChannels() bool {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
+// Goroutine for transmission launched by connectLoop.
+func (c *Cl4) txLoop() {
+	for m := range c.txChan {
+		if m == nil {
+			return
+		}
 
-  anyNotJoined := false
-  for _, ch := range c.channels {
-    if ch.joinedEpoch != atomic.LoadUint32(&c.epoch) {
-      anyNotJoined = true
-      c.writeJoin(ch.Channel, ch.Key)
-    }
-  }
-
-  return anyNotJoined
+		err := c.cl3.WriteMsg(m)
+		if err != nil {
+			return
+		}
+	}
 }
 
-func (c *Cl4) addChannelJoin(channelName, key string) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
-
-  _, ok := c.channels[channelName]
-  if ok {
-    return
-  }
-
-  ch := &channel{}
-  ch.Channel = channelName
-  ch.Key = key
-  ch.members = map[string]*member{}
-
-  c.channels[channelName] = ch
-
-  trySema(c.channelsUpdatedChan)
+// Goroutine for reception launched by connectLoop.
+func (c *Cl4) rxLoop() {
+	for {
+		m, err := c.cl3.ReadMsg()
+		if err != nil {
+			return
+		}
+		if m.Command == "PONG" {
+			c.rxPingChan <- m
+		}
+		c.rxChan <- m
+	}
 }
 
-func (c *Cl4) removeChannelJoin(channelName string) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
+// Make a series of connection attempts. Returns if the maximum number of tries
+// are reached.
+func (c *Cl4) clConnect() error {
+	for {
+		err := c.clConnectAttempt()
+		if err == nil {
+			c.cfg.Backoff.Reset()
+			return nil
+		}
 
-  _, ok := c.channels[channelName]
-  if !ok {
-    return
-  }
+		if atomic.LoadUint32(&c.closed) != 0 {
+			return nil
+		}
 
-  delete(c.channels, channelName)
+		if !c.cfg.Backoff.Sleep() {
+			return err
+		}
+	}
 }
 
-func (c *Cl4) markChannelAsJoined(channelName string, joined bool) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
+// Makes a single connection attempt.
+func (c *Cl4) clConnectAttempt() error {
+	c.clDisconnect()
 
-  ch, ok := c.channels[channelName]
-  if !ok {
-    return
-  }
+	cc, err := cl3.Dial(c.scope, c.address, c.cfg.Config)
+	if err != nil {
+		return err
+	}
 
-  if joined {
-    ch.joinedEpoch = atomic.LoadUint32(&c.epoch)
-    c.solicitChannelMembers(channelName)
-  } else {
-    ch.joinedEpoch = 0
-    ch.members = map[string]*member{}
-    trySema(c.channelsUpdatedChan)
-  }
+	c.cl3 = cc
+	return nil
 }
 
-func (c *Cl4) solicitChannelMembers(channelName string) {
-  c.WriteCmd("WHO", channelName)
+// If there is currently a connection, disconnects it.
+func (c *Cl4) clDisconnect() {
+	if c.cl3 == nil {
+		return
+	}
+
+	c.stopPingChan <- struct{}{}
+	c.cl3.Close()
+	c.cl3 = nil
 }
 
-func (c *Cl4) userEnteredChannel(channelName, userName, hostName, nickName, flags string, live bool) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
+// Closes the connection.
+func (c *Cl4) Close() error {
+	c.closeOnce.Do(func() {
+		atomic.StoreUint32(&c.closed, 1)
+		close(c.closeChan)
+	})
 
-  ch, ok := c.channels[channelName]
-  if !ok {
-    return
-  }
-
-  pl := parsePrivSigils(flags)
-
-  mi := &member{}
-  if mi2, ok := ch.members[nickName]; ok {
-    mi = mi2
-  }
-
-  mi.userName = userName
-  mi.nickName = nickName
-  mi.hostName = hostName
-  mi.privLevel = pl
-
-  ch.members[nickName] = mi
+	return nil
 }
 
-func (c *Cl4) userLeftChannel(channelName, userName, hostName, nickName string, wasKicked bool) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Unlock()
+var ErrClosed = fmt.Errorf("connection is closed")
 
-  ch, ok := c.channels[channelName]
-  if !ok {
-    return
-  }
+// Writes a message. Returns ErrClosed if the connection has been closed.
+func (c *Cl4) WriteMsg(m *ircparse.Message) error {
+	if m == nil {
+		return fmt.Errorf("cannot send nil message")
+	}
 
-  _, ok = ch.members[nickName]
-  if !ok {
-    return
-  }
-
-  delete(ch.members, nickName)
+	select {
+	case c.txChan <- m:
+		return nil
+	case <-c.closeChan:
+		return ErrClosed
+	}
 }
 
-func (c *Cl4) userChangedNick(oldNickName, newNickName string) {
-  c.channelsMutex.Lock()
-  defer c.channelsMutex.Lock()
-
-  for _, ch := range c.channels {
-    mi, ok := ch.members[oldNickName]
-    if ok {
-      delete(ch.members, oldNickName)
-      ch.members[newNickName] = mi
-      mi.nickName = newNickName
-    }
-  }
-}
-
-func parsePrivSigils(sigils string) privLevel {
-  pl := plNone
-  for _, r := range sigils {
-    if r == '@' && pl < plOp {
-      pl = plOp
-    }
-    if r == '+' && pl < plVoice {
-      pl = plVoice
-    }
-    if r == '%' && pl < plHalfop {
-      pl = plHalfop
-    }
-    if r == '&' && pl < plAdmin {
-      pl = plAdmin
-    }
-    if r == '~' && pl < plFounder {
-      pl = plFounder
-    }
-  }
-  return pl
-}
-
-func trySema(c chan struct{}) {
-  select {
-  case c <- struct{}{}:
-  default:
-  }
-}
-
-func (c *Cl4) writeJoin(channel, key string) error {
-  if key == "" {
-    return c.WriteCmd("JOIN", channel)
-  }
-  return c.WriteCmd("JOIN", channel, key)
-}
-
-var errIsClosed = fmt.Errorf("client is closed")
-
-func (c *Cl4) replaceClient() error {
-  if atomic.LoadUint32(&c.closed) != 0 {
-    return errIsClosed
-  }
-
-  for {
-    epoch := atomic.LoadUint32(&c.epoch)
-    replacer := atomic.LoadUint32(&c.replacer)
-    if replacer >= epoch {
-      break
-    }
-
-    if !atomic.CompareAndSwapUint32(&c.replacer, replacer, epoch) {
-      continue
-    }
-
-    go c.replaceTask(epoch)
-    break
-  }
-
-  <-c.replaceWaitChan
-  if atomic.LoadUint32(&c.closed) != 0 {
-    return errIsClosed
-  }
-
-  return nil
-}
-
-func (c *Cl4) replaceTask(epoch uint32) {
-  c.backing().Close()
-
-  for {
-    if !c.cfg.Backoff.Sleep() {
-      // Max retries exceeded.
-      c.Close()
-      return
-    }
-
-    cc, err := cl3.Dial(c.scope, c.address, c.cfg.Config)
-    if err != nil {
-      continue
-    }
-
-    c.pongChan <- struct{}{}
-    atomic.StorePointer(&c.cl3, unsafe.Pointer(cc))
-    c.cfg.Backoff.Reset()
-
-    atomic.StoreUint32(&c.epoch, epoch+1)
-    close(c.replaceWaitChan)
-    c.replaceWaitChan = make(chan struct{})
-
-    trySema(c.channelsUpdatedChan)
-  }
+// Reads a message. Returns ErrClosed if the connection has been closed.
+func (c *Cl4) ReadMsg() (*ircparse.Message, error) {
+	select {
+	case m := <-c.rxChan:
+		return m, nil
+	case <-c.closeChan:
+		return nil, ErrClosed
+	}
 }
