@@ -386,7 +386,7 @@ func (p *Parser) pdispatch(c rune) error {
 		}
 
 	case psFROMUSERHIPV6:
-		if (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || (c >= '0' && c <= '9') ||
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == ':' {
 			p.s += string(c)
 		} else if c == ' ' {

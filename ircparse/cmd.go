@@ -1,10 +1,22 @@
 package ircparse
 
-type MessageSink interface {
+import "io"
+
+type Source interface {
+	ReadMsg() (*Message, error)
+}
+
+type Sink interface {
 	WriteMsg(*Message) error
 }
 
-func WriteCmd(sink MessageSink, cmd string, args ...string) error {
+type Conn interface {
+	Sink
+	Source
+	io.Closer
+}
+
+func WriteCmd(sink Sink, cmd string, args ...string) error {
 	return sink.WriteMsg(&Message{
 		Command: cmd,
 		Args:    args,
