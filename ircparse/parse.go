@@ -341,7 +341,7 @@ func (p *Parser) pdispatch(c rune) error {
 
 	case psFROMUSERHCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-			c == '_' || c == '-' {
+			c == '_' || c == '-' || c == '/' /* Freenode vhost */ {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
@@ -359,7 +359,7 @@ func (p *Parser) pdispatch(c rune) error {
 
 	case psFROMUSERHNPSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-			c == '_' || c == '-' {
+			c == '_' || c == '-' || c == '/' /* Freenode vhost */ {
 			p.s += string(c)
 			p.state = psFROMUSERHNPCONT
 		} else if c == ' ' {
@@ -372,7 +372,7 @@ func (p *Parser) pdispatch(c rune) error {
 
 	case psFROMUSERHNPCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-			c == '_' || c == '-' {
+			c == '_' || c == '-' || c == '/' /* Freenode vhost */ {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
@@ -386,7 +386,7 @@ func (p *Parser) pdispatch(c rune) error {
 		}
 
 	case psFROMUSERHIPV6:
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || /* Charybdis host masking uses full alpha */
 			c == ':' {
 			p.s += string(c)
 		} else if c == ' ' {

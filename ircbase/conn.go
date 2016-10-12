@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 )
 
 var log, Log = xlog.NewQuiet("irc.base")
@@ -14,9 +15,10 @@ var log, Log = xlog.NewQuiet("irc.base")
 // A basic IRC connection. Doesn't handle pings or anything else by itself; a
 // raw, low-level message stream.
 type Conn struct {
-	conn   net.Conn
-	parser ircparse.Parser
-	buf    []byte
+	conn                  net.Conn
+	parser                ircparse.Parser
+	buf                   []byte
+	readMutex, writeMutex sync.Mutex
 }
 
 // Creates a new low-level IRC connection over an underlying transport,
@@ -38,6 +40,8 @@ func (c *Conn) Close() error {
 
 // Writes a message to the underlying connection. Implements ircparse.Sink.
 func (c *Conn) WriteMsg(m *ircparse.Message) error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
 	s := m.String()
 	_, err := io.WriteString(c.conn, s)
 	log.Debugf("TX: %v", strings.TrimRight(s, "\r\n"))
@@ -46,6 +50,9 @@ func (c *Conn) WriteMsg(m *ircparse.Message) error {
 
 // Reads a message from the underlying connection. Implements ircparse.Source.
 func (c *Conn) ReadMsg() (*ircparse.Message, error) {
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
+
 	for {
 		m := c.parser.PopMessage()
 		if m != nil {

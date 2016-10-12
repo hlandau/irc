@@ -95,11 +95,46 @@ var ss = []item{
 			Command:  "PING",
 		},
 	}},
+	// Charybdis can mangle IP addresses to use non-hexadecimal letters; we must accept this
+	item{":nick!user@111.222.xyz.xWz PING\r\n", true, []*Message{
+		{
+			NickName: "nick",
+			UserName: "user",
+			HostName: "111.222.xyz.xWz",
+			Command:  "PING",
+		},
+	}},
 	item{":nick!user@dead:beef:dead:beef:1234:4567:89ad:beef PING\r\n", true, []*Message{
 		{
 			NickName: "nick",
 			UserName: "user",
 			HostName: "dead:beef:dead:beef:1234:4567:89ad:beef",
+			Command:  "PING",
+		},
+	}},
+	// Charybdis can mangle IP addresses to use non-hexadecimal letters; we must accept this
+	item{":nick!user@dead:bxyz:dXYZ:beef:1234:z567:89ad:Zeef PING\r\n", true, []*Message{
+		{
+			NickName: "nick",
+			UserName: "user",
+			HostName: "dead:bxyz:dXYZ:beef:1234:z567:89ad:Zeef",
+			Command:  "PING",
+		},
+	}},
+	item{":nick!user@zead:bxyz:dXYZ:beef:1234:z567:89ad:Zeef PING\r\n", true, []*Message{
+		{
+			NickName: "nick",
+			UserName: "user",
+			HostName: "zead:bxyz:dXYZ:beef:1234:z567:89ad:Zeef",
+			Command:  "PING",
+		},
+	}},
+	// Freenode can use slashes in vhosts
+	item{":nick!user@this/is/my/Host PING\r\n", true, []*Message{
+		{
+			NickName: "nick",
+			UserName: "user",
+			HostName: "this/is/my/Host",
 			Command:  "PING",
 		},
 	}},
