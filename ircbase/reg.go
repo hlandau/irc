@@ -36,6 +36,10 @@ type Registerer struct {
 }
 
 // Configuration options for a Registerer.
+//
+// If you set one of the Name values, the other names will be set from it
+// automatically. It is recommended that you at least set a NickName. If you
+// don't set any name, a random name will be generated automatically.
 type RegisterConfig struct {
 	UserName         string // Username to register with.
 	NickName         string // Nickname to register with.

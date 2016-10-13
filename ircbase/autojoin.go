@@ -111,6 +111,9 @@ type autojoin struct {
 	currentNick string
 }
 
+// Wraps an underlying connection. Tracks the channels you join and tries to
+// keep you joined to those channels until you part them. Should be wrapped
+// around an enduring connection such as a Reconnecter.
 func NewAutoJoin(underlyingConn ircparse.Conn) (ircparse.Conn, error) {
 	j := &autojoin{
 		underlyingConn:       underlyingConn,

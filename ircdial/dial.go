@@ -1,4 +1,4 @@
-// Package ircdial provides utilities for making TCP connections to IRC
+// Package ircdial provides utilities for making TCP or TLS connections to IRC
 // servers.
 package ircdial
 
@@ -9,6 +9,7 @@ import (
 	"net"
 )
 
+// Configuration for dialing. A zero-valued struct is a valid config.
 type Config struct {
 	Dialer    net.Dialer
 	TLSConfig *tls.Config
@@ -43,6 +44,12 @@ func dial(scope, address string, cfg Config) (net.Conn, error) {
 	}
 }
 
+// Dials the server given by address. The address should be in the form
+// "hostname:port". If a port is not specified, a sensible default is used
+// (6667 or 66697).
+//
+// scope should be "tcp" or "tls". The returned net.Conn is a raw TCP or TLS
+// socket.
 func Dial(scope, address string, cfg Config) (net.Conn, error) {
 	cfg.setDefaults()
 	return dial(scope, address, cfg)

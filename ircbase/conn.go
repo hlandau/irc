@@ -1,4 +1,7 @@
-// Package ircbase provides basic IRC client functionality.
+// Package ircbase provides basic IRC client functionality in the form of a
+// basic IRC protocol connection, and layers on top of that interface which
+// implement basic services such as ping handling, registration, reconnection
+// and channel rejoining.
 package ircbase
 
 import (
@@ -14,7 +17,7 @@ var log, Log = xlog.NewQuiet("irc.base")
 
 // A basic IRC connection. Doesn't handle pings or anything else by itself; a
 // raw, low-level message stream.
-type Conn struct {
+type llConn struct {
 	conn                  net.Conn
 	parser                ircparse.Parser
 	buf                   []byte
@@ -22,9 +25,9 @@ type Conn struct {
 }
 
 // Creates a new low-level IRC connection over an underlying transport,
-// typically a TCP connection.
-func New(conn net.Conn) (*Conn, error) {
-	c := &Conn{
+// typically a TCP or TLS connection.
+func NewConn(conn net.Conn) (ircparse.Conn, error) {
+	c := &llConn{
 		conn: conn,
 		buf:  make([]byte, 512),
 	}
@@ -33,13 +36,13 @@ func New(conn net.Conn) (*Conn, error) {
 }
 
 // Closes the underlying connection.
-func (c *Conn) Close() error {
+func (c *llConn) Close() error {
 	c.conn.Close()
 	return nil
 }
 
 // Writes a message to the underlying connection. Implements ircparse.Sink.
-func (c *Conn) WriteMsg(m *ircparse.Message) error {
+func (c *llConn) WriteMsg(m *ircparse.Message) error {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 	s := m.String()
@@ -49,7 +52,7 @@ func (c *Conn) WriteMsg(m *ircparse.Message) error {
 }
 
 // Reads a message from the underlying connection. Implements ircparse.Source.
-func (c *Conn) ReadMsg() (*ircparse.Message, error) {
+func (c *llConn) ReadMsg() (*ircparse.Message, error) {
 	c.readMutex.Lock()
 	defer c.readMutex.Unlock()
 
