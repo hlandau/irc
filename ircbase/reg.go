@@ -37,10 +37,11 @@ type Registerer struct {
 
 // Configuration options for a Registerer.
 type RegisterConfig struct {
-	UserName       string // Username to register with.
-	NickName       string // Nickname to register with.
-	RealName       string // Realname to register with.
-	ServerPassword string // Server password to use, if any.
+	UserName         string // Username to register with.
+	NickName         string // Nickname to register with.
+	RealName         string // Realname to register with.
+	ServerPassword   string // Server password to use, if any.
+	NickServPassword string // If set, identify to nickserv.
 }
 
 func (cfg *RegisterConfig) setDefaults() {
@@ -177,6 +178,11 @@ func (r *Registerer) handleRegMsg(msg *ircparse.Message) error {
 	switch msg.Command {
 	case "001": // RPL_WELCOME
 		// Welcome to IRC.
+		if r.cfg.NickServPassword != "" {
+			// ignore errors
+			ircparse.WriteCmd(r.underlyingConn, "PRIVMSG", "NickServ", fmt.Sprintf("IDENTIFY %s", r.cfg.NickServPassword))
+		}
+
 	case "002": // RPL_YOURHOST
 		// Your host is <servername>, running version <version>
 	case "003": // RPL_CREATED
