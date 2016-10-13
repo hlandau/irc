@@ -13,6 +13,7 @@ type Config struct {
 	Dial     ircdial.Config
 	Ping     ircbase.PingConfig
 	Register ircbase.RegisterConfig
+	Autojoin ircbase.AutojoinConfig
 }
 
 // Returns an IRC server connection which provides ping handling, initial
@@ -52,6 +53,6 @@ func Dial(scope, addr string, cfg Config) (ircparse.Conn, error) {
 		return nil, err
 	}
 
-	conn, err = ircbase.NewAutoJoin(conn)
+	conn, err = ircbase.NewAutoJoin(conn, cfg.Autojoin)
 	return conn, err
 }

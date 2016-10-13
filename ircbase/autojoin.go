@@ -1,6 +1,7 @@
 package ircbase
 
 import (
+	denet "github.com/hlandau/goutils/net"
 	"github.com/hlandau/irc/ircparse"
 	"sync"
 	"time"
@@ -8,6 +9,7 @@ import (
 
 type channelJoiner struct {
 	j                *autojoin
+	backoff          denet.Backoff
 	name             string
 	keyMutex         sync.Mutex
 	key              string
@@ -23,7 +25,9 @@ func newChannelJoiner(j *autojoin, name, key string) *channelJoiner {
 		key:              key,
 		statusChangeChan: make(chan bool),
 		terminateChan:    make(chan struct{}),
+		backoff:          j.cfg.Backoff,
 	}
+	cj.backoff.Reset()
 
 	go cj.loop()
 	return cj
@@ -55,13 +59,14 @@ func (cj *channelJoiner) loop() {
 		case joined := <-cj.statusChangeChan:
 			cj.joined = joined
 			if joined {
+				cj.backoff.Reset()
 				cj.quietLoop()
 			} else {
 				// if we get a status change to false while false, this means we've
 				// reconnected and should try again immediately
 				cj.sendJoin()
 			}
-		case <-time.After(30 * time.Second):
+		case <-time.After(cj.backoff.NextDelay()):
 			cj.sendJoin()
 		case <-cj.terminateChan:
 			return
@@ -95,7 +100,14 @@ func (cj *channelJoiner) sendJoin() error {
 
 //
 
+// Configuration for an autojoiner.
+type AutojoinConfig struct {
+	Backoff denet.Backoff // Backoff interval for rejoining channels. MaxTries ignored.
+}
+
 type autojoin struct {
+	cfg AutojoinConfig
+
 	requestReadChan  chan chan readResponse
 	requestWriteChan chan writeRequest
 
@@ -114,8 +126,9 @@ type autojoin struct {
 // Wraps an underlying connection. Tracks the channels you join and tries to
 // keep you joined to those channels until you part them. Should be wrapped
 // around an enduring connection such as a Reconnecter.
-func NewAutoJoin(underlyingConn ircparse.Conn) (ircparse.Conn, error) {
+func NewAutoJoin(underlyingConn ircparse.Conn, cfg AutojoinConfig) (ircparse.Conn, error) {
 	j := &autojoin{
+		cfg:                  cfg,
 		underlyingConn:       underlyingConn,
 		channels:             map[string]*channelJoiner{},
 		requestReadChan:      make(chan chan readResponse),
@@ -123,6 +136,7 @@ func NewAutoJoin(underlyingConn ircparse.Conn) (ircparse.Conn, error) {
 		requestCloseChan:     make(chan struct{}),
 		shutdownCompleteChan: make(chan struct{}),
 	}
+	j.cfg.Backoff.MaxTries = 0
 
 	go j.loop()
 

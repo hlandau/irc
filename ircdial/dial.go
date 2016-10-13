@@ -46,7 +46,7 @@ func dial(scope, address string, cfg Config) (net.Conn, error) {
 
 // Dials the server given by address. The address should be in the form
 // "hostname:port". If a port is not specified, a sensible default is used
-// (6667 or 66697).
+// (6667 or 6697).
 //
 // scope should be "tcp" or "tls". The returned net.Conn is a raw TCP or TLS
 // socket.
