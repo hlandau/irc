@@ -16,7 +16,7 @@ import (
 // If registration fails, the connection is terminated and further attempts to
 // use the connection result in an error. If registration succeeds, you will
 // receive the registration success typical messages, 001 etc.
-type Registerer struct {
+type registerer struct {
 	cfg              RegisterConfig
 	requestReadChan  chan chan readResponse
 	requestWriteChan chan writeRequest
@@ -115,7 +115,7 @@ func alternateNickName(preferred, current string) string {
 
 // Creates a new Registerer wrapping the given underlying connection.
 func NewRegisterer(underlyingConn ircparse.Conn, cfg RegisterConfig) (ircparse.Conn, error) {
-	r := &Registerer{
+	r := &registerer{
 		cfg:                  cfg,
 		underlyingConn:       underlyingConn,
 		requestReadChan:      make(chan chan readResponse),
@@ -131,7 +131,7 @@ func NewRegisterer(underlyingConn ircparse.Conn, cfg RegisterConfig) (ircparse.C
 	return r, nil
 }
 
-func (r *Registerer) loop() {
+func (r *registerer) loop() {
 	defer close(r.shutdownCompleteChan)
 	defer func() {
 		if r.underlyingConn != nil {
@@ -142,7 +142,7 @@ func (r *Registerer) loop() {
 	r.shutdownError = r.loopInner()
 }
 
-func (r *Registerer) loopInner() error {
+func (r *registerer) loopInner() error {
 	err := r.register()
 	if err != nil {
 		return err
@@ -174,7 +174,7 @@ func (r *Registerer) loopInner() error {
 	}
 }
 
-func (r *Registerer) handleRegMsg(msg *ircparse.Message) error {
+func (r *registerer) handleRegMsg(msg *ircparse.Message) error {
 	if r.regDone {
 		return nil
 	}
@@ -225,7 +225,7 @@ func (r *Registerer) handleRegMsg(msg *ircparse.Message) error {
 	return nil
 }
 
-func (r *Registerer) register() error {
+func (r *registerer) register() error {
 	r.currentNick = r.cfg.NickName
 
 	if r.cfg.ServerPassword != "" {
@@ -250,14 +250,14 @@ func (r *Registerer) register() error {
 
 var errClosed = fmt.Errorf("registerer IRC connection was closed")
 
-func (r *Registerer) finalError() error {
+func (r *registerer) finalError() error {
 	if r.shutdownError == nil {
 		return errClosed
 	}
 	return r.shutdownError
 }
 
-func (r *Registerer) WriteMsg(msg *ircparse.Message) error {
+func (r *registerer) WriteMsg(msg *ircparse.Message) error {
 	errorChan := make(chan error, 1)
 	select {
 	case r.requestWriteChan <- writeRequest{msg, errorChan}:
@@ -267,7 +267,7 @@ func (r *Registerer) WriteMsg(msg *ircparse.Message) error {
 	}
 }
 
-func (r *Registerer) ReadMsg() (*ircparse.Message, error) {
+func (r *registerer) ReadMsg() (*ircparse.Message, error) {
 	responseChan := make(chan readResponse, 1)
 	select {
 	case r.requestReadChan <- responseChan:
@@ -279,7 +279,7 @@ func (r *Registerer) ReadMsg() (*ircparse.Message, error) {
 	}
 }
 
-func (r *Registerer) Close() error {
+func (r *registerer) Close() error {
 	r.requestCloseOnce.Do(func() {
 		close(r.requestCloseChan)
 	})
