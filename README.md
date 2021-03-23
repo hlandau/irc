@@ -1,6 +1,6 @@
 # irc
 
-[![GoDoc](https://godoc.org/github.com/hlandau/irc?status.svg)](https://godoc.org/github.com/hlandau/irc)
+[![godocs.io](https://godocs.io/github.com/hlandau/irc?status.svg)](https://godocs.io/github.com/hlandau/irc) [![No modules](https://www.devever.net/~hl/f/no-modules2.svg) 100% modules-free.](https://www.devever.net/~hl/gomod)
 
 This is an IRC client library for Go. The top-level package provides a simple
 interface to get started. The interface provided is in the form of `ReadMsg`
